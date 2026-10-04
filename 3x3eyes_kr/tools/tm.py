@@ -20,7 +20,13 @@ def segs(s):
     return parts, seps
 
 def norm(t):
-    return t.replace('・・・', '¨¨').replace('・・', '¨¨').strip()
+    # 같은 대사가 파일마다 표기만 다른 경우가 많아 정규화해서 대조한다
+    t = t.replace('・・・・・', '¨¨¨¨¨').replace('・・・', '¨¨').replace('・・', '¨¨')
+    t = t.replace('他に', 'ほかに').replace('他の', 'ほかの')
+    t = t.replace('いらしゃいまし', 'いらっしゃいませ')
+    t = t.replace('買い取らせてもらいもしょう', '買い取らせてもらいましょう')
+    t = t.rstrip('。')
+    return t.strip()
 
 def main(sheet):
     rows = list(csv.reader(open(sheet, encoding='utf-8'), delimiter='\t'))
