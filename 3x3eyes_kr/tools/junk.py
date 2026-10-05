@@ -26,7 +26,10 @@ def is_junk(s):
     # 2) 조사/문장부호가 하나도 없음
     if not any(m in t for m in MARKERS):
         return True
-    # 3) 한자 비율이 비정상적으로 높음 (난수 바이트의 특징)
+    # 3) 길이에 비해 제어코드가 과도 — 그래픽 바이트가 제어코드로 풀린 경우
+    if len(CTRL.findall(s)) * 6 > len(t):
+        return True
+    # 4) 한자 비율이 비정상적으로 높음 (난수 바이트의 특징)
     kanji = sum(1 for ch in t if '一' <= ch <= '鿿')
     hira = sum(1 for ch in t if '぀' <= ch <= 'ゟ')
     if kanji and hira / (kanji + hira) < 0.25:

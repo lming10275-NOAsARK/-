@@ -6,6 +6,7 @@
 """
 import os, sys, json, csv, collections, re, shutil
 from tbl import load
+from dump_text import pointer_table, TEXT_BLOCK
 import kofont
 
 # <br />, <0xdb>, <portrait_00> 같은 제어코드와 [player] 같은 치환코드
@@ -115,10 +116,22 @@ def main(files_dir, sheet_path, map_path, out_dir):
                         raise ValueError('표현할 수 없는 문자 %r' % ch)
         return bytes(out)
 
+    # 3-1) 안전장치 — 텍스트 opcode가 있는 '엔트리 진입점'은 절대 건드리지 않는다.
+    #      런 추출이 opcode 바이트를 문자로 흡수한 경우가 드물게 있는데,
+    #      거기에 번역문을 쓰면 대사 분기가 깨진다.
+    entry_sites = set()
+    for name in sorted(os.listdir(files_dir)):
+        if not name.startswith('EV') or not name.endswith('.DAT'):
+            continue
+        b = open(os.path.join(files_dir, name), 'rb').read()
+        ptrs = pointer_table(b, TEXT_BLOCK)
+        if ptrs:
+            entry_sites |= {(name, TEXT_BLOCK + p) for p in ptrs}
+
     os.makedirs(out_dir, exist_ok=True)
     # 4) EV 파일 패치
     edits = collections.defaultdict(list)
-    over, shrunk = [], []
+    over, shrunk, skipped = [], [], []
     for sid, text in kr.items():
         rec = smap[sid]
         budget = rec['bytes']
@@ -134,9 +147,15 @@ def main(files_dir, sheet_path, map_path, out_dir):
             else:
                 over.append((sid, len(data), budget, text[:30]))
                 continue
-        data = data + b'\x00' * (budget - len(data))   # 남는 자리는 공백코드로 패딩
+        # 남는 자리는 0x00 으로 채운다. 0x00 은 이 게임의 문자열 종결자이므로
+        # (문자열 앞 3153건 / 뒤 2812건에서 확인) 뒤쪽은 그대로 무시된다.
+        data = data + b'\x00' * (budget - len(data))
         for w in rec['where']:
-            edits[w['file']].append((int(w['offset'], 16), data))
+            site = (w['file'], int(w['offset'], 16))
+            if site in entry_sites:
+                skipped.append((sid, w['file'], w['offset']))
+                continue
+            edits[w['file']].append((site[1], data))
 
     for name, lst in edits.items():
         src = os.path.join(files_dir, name)
@@ -169,6 +188,8 @@ def main(files_dir, sheet_path, map_path, out_dir):
     print('패치한 EV 파일 %d개, 교체 문자열 %d건' % (len(edits), len(kr) - len(over)))
     if shrunk:
         print('자동 축약 %d건 (공백/말줄임 정리로 한도 충족)' % len(shrunk))
+    if skipped:
+        print('안전장치로 제외한 지점 %d곳 (엔트리 진입점 — opcode 영역)' % len(skipped))
     if over:
         print('바이트 초과로 보류 %d건 (요약):' % len(over))
         for o in over[:8]:
