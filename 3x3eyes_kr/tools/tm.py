@@ -96,10 +96,10 @@ def main(sheet, glossary='translation/glossary.tsv'):
     print('자동 번역 %d건' % filled)
     print('남은 미번역 %d건' % sum(1 for r in body if len(r) < 6 or not r[5].strip()))
 
-def report(sheet, limit=60):
+def report(sheet, limit=60, glossary='translation/glossary.tsv'):
     """미번역 항목을 자동 완성하지 못하게 막는 '빠진 문장'을 빈도순으로 보고."""
     rows = list(csv.reader(open(sheet, encoding='utf-8'), delimiter='\t'))[1:]
-    mem = set()
+    mem = set(load_glossary(glossary))
     for r in rows:
         if len(r) < 6 or not r[5].strip():
             continue
