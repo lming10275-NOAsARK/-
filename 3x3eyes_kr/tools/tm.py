@@ -5,7 +5,9 @@
 게임 대사에는 같은 문장이 상점/숙소/교회마다 반복되고, 같은 내용이
 EV 파일별로 다른 제어코드로 이어붙여진 경우가 많아 재사용률이 높다.
 """
-import sys, csv, re, collections
+import sys, csv, re, collections, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from junk import is_junk
 
 CTRL = re.compile(r'<[^<>]{1,24}>|\[[^\[\]]{1,24}\]')
 
@@ -28,12 +30,27 @@ def norm(t):
     t = t.rstrip('。')
     return t.strip()
 
-def main(sheet):
+def load_glossary(path):
+    """일본어조각<탭>한국어 형식. 메모리에 미리 넣어 자동 완성률을 끌어올린다."""
+    g = {}
+    try:
+        for ln in open(path, encoding='utf-8'):
+            ln = ln.rstrip('\n')
+            if not ln.strip() or '\t' not in ln or ln.startswith('#'):
+                continue
+            a, b = ln.split('\t', 1)
+            g[norm(a)] = b
+    except FileNotFoundError:
+        pass
+    return g
+
+def main(sheet, glossary='translation/glossary.tsv'):
     rows = list(csv.reader(open(sheet, encoding='utf-8'), delimiter='\t'))
     head, body = rows[0], rows[1:]
 
-    # 1) 학습 — 세그먼트 수와 구분자가 일치하는 쌍만 신뢰
-    mem = {}
+    # 1) 학습 — 용어집을 먼저 넣고, 번역된 항목에서 세그먼트 쌍을 추가 학습
+    mem = load_glossary(glossary)
+    print('용어집 %d개 선적재' % len(mem))
     for r in body:
         if len(r) < 6 or not r[5].strip():
             continue
@@ -59,6 +76,9 @@ def main(sheet):
                 out.append(p)
             elif n in mem:
                 out.append(mem[n])
+            elif is_junk(p):
+                # 대사 뒤에 붙은 그래픽 바이트 조각 — 번역하지 않고 원본 그대로 둔다
+                out.append(p)
             else:
                 ok = False
                 break
@@ -76,5 +96,34 @@ def main(sheet):
     print('자동 번역 %d건' % filled)
     print('남은 미번역 %d건' % sum(1 for r in body if len(r) < 6 or not r[5].strip()))
 
+def report(sheet, limit=60):
+    """미번역 항목을 자동 완성하지 못하게 막는 '빠진 문장'을 빈도순으로 보고."""
+    rows = list(csv.reader(open(sheet, encoding='utf-8'), delimiter='\t'))[1:]
+    mem = set()
+    for r in rows:
+        if len(r) < 6 or not r[5].strip():
+            continue
+        jp, kr = segs(r[4]), segs(r[5])
+        if len(jp[0]) != len(kr[0]) or jp[1] != kr[1]:
+            continue
+        for a in jp[0]:
+            if norm(a):
+                mem.add(norm(a))
+    need = collections.Counter()
+    for r in rows:
+        if len(r) < 6 or r[5].strip():
+            continue
+        miss = [norm(p) for p in segs(r[4])[0]
+                if norm(p) and norm(p) not in mem and not is_junk(p)]
+        # 거의 다 아는 항목일수록 가치가 높다
+        if miss and len(miss) <= 12:
+            for m in miss:
+                need[m] += 1
+    for t, n in need.most_common(limit):
+        print('%d|%s' % (n, t))
+
 if __name__ == '__main__':
-    main(sys.argv[1])
+    if len(sys.argv) > 2 and sys.argv[2] == 'report':
+        report(sys.argv[1], int(sys.argv[3]) if len(sys.argv) > 3 else 60)
+    else:
+        main(*sys.argv[1:])

@@ -22,6 +22,10 @@ def read_sheet(path):
                 out[row[0]] = row[5].strip()
     return out
 
+def is_jp(ch):
+    """일본어 가나/한자 — 번역되지 않고 남은 그래픽 조각의 문자."""
+    return '\u3040' <= ch <= '\u30ff' or '\u4e00' <= ch <= '\u9fff'
+
 def split_tokens(s):
     """문자열을 (텍스트|제어코드) 토큰으로 분해"""
     toks, i = [], 0
@@ -34,10 +38,41 @@ def split_tokens(s):
         toks.append(('t', s[i:]))
     return toks
 
+def shrink_steps(text):
+    """바이트 한도를 조금 넘을 때 쓰는 보수적인 축약 사다리.
+    품질 손실이 적은 것부터 차례로 시도한다."""
+    yield text
+    t = text.replace('¨¨¨', '¨¨')
+    if t != text:
+        yield t
+    t2 = t.replace('¨¨', '¨')
+    if t2 != t:
+        yield t2
+    cur = t2
+    # 본문 구간의 공백을 뒤에서부터 하나씩 제거 (제어코드는 건드리지 않는다)
+    for _ in range(40):
+        toks = split_tokens(cur)
+        hit = False
+        for i in range(len(toks) - 1, -1, -1):
+            kind, body = toks[i]
+            if kind == 't' and ' ' in body:
+                j = body.rfind(' ')
+                toks[i] = (kind, body[:j] + body[j + 1:])
+                hit = True
+                break
+        if not hit:
+            break
+        cur = ''.join(b for _, b in toks)
+        yield cur
+
 def main(files_dir, sheet_path, map_path, out_dir):
     tbl, _ = load(os.path.join(os.path.dirname(__file__), '3x3eyes.tbl'))
     ctrl_code = {v: k for k, v in tbl.items()
                  if v.startswith('<') or v.startswith('[')}
+    jp_code = {}
+    for code, val in sorted(tbl.items()):
+        if len(val) == 1 and is_jp(val) and val not in jp_code:
+            jp_code[val] = code
     smap = json.load(open(map_path, encoding='utf-8'))
     kr = read_sheet(sheet_path)
     if not kr:
@@ -51,7 +86,8 @@ def main(files_dir, sheet_path, map_path, out_dir):
         for kind, t in split_tokens(text):
             if kind == 't':
                 for ch in t:
-                    freq[ch] += n
+                    if not is_jp(ch):      # 일본어 잔존 문자는 원본 코드를 그대로 쓴다
+                        freq[ch] += n
     chars = [c for c, _ in freq.most_common()]
 
     # 2) 코드 할당
@@ -71,20 +107,33 @@ def main(files_dir, sheet_path, map_path, out_dir):
                 out += c
             else:
                 for ch in t:
-                    out += mapping[ch]
+                    if ch in mapping:
+                        out += mapping[ch]
+                    elif ch in jp_code:    # 원본 일본어 코드 보존
+                        out += jp_code[ch]
+                    else:
+                        raise ValueError('표현할 수 없는 문자 %r' % ch)
         return bytes(out)
 
     os.makedirs(out_dir, exist_ok=True)
     # 4) EV 파일 패치
     edits = collections.defaultdict(list)
-    over = []
+    over, shrunk = [], []
     for sid, text in kr.items():
         rec = smap[sid]
-        data = enc(text)
         budget = rec['bytes']
+        data = enc(text)
         if len(data) > budget:
-            over.append((sid, len(data), budget, text[:30]))
-            continue
+            # 자동 축약 시도
+            for cand in shrink_steps(text):
+                d = enc(cand)
+                if len(d) <= budget:
+                    shrunk.append((sid, text, cand, len(data), budget))
+                    data, text = d, cand
+                    break
+            else:
+                over.append((sid, len(data), budget, text[:30]))
+                continue
         data = data + b'\x00' * (budget - len(data))   # 남는 자리는 공백코드로 패딩
         for w in rec['where']:
             edits[w['file']].append((int(w['offset'], 16), data))
@@ -108,11 +157,23 @@ def main(files_dir, sheet_path, map_path, out_dir):
         for ch, code in sorted(mapping.items(), key=lambda kv: kv[1]):
             f.write('%s=%s\n' % (code.hex().upper(), ch))
 
+    # 초과/축약 내역을 보고서로 남긴다 (번역자가 나중에 제대로 다듬도록)
+    rep = os.path.join(os.path.dirname(sheet_path) or '.', 'overflow_report.tsv')
+    with open(rep, 'w', encoding='utf-8') as f:
+        f.write('구분\tid\t필요바이트\t한도\t내용\n')
+        for sid, before, after, n, b in shrunk:
+            f.write('자동축약\t%s\t%d\t%d\t%s\t=>\t%s\n' % (sid, n, b, before, after))
+        for sid, n, b, t in over:
+            f.write('보류\t%s\t%d\t%d\t%s\n' % (sid, n, b, t))
+
     print('패치한 EV 파일 %d개, 교체 문자열 %d건' % (len(edits), len(kr) - len(over)))
+    if shrunk:
+        print('자동 축약 %d건 (공백/말줄임 정리로 한도 충족)' % len(shrunk))
     if over:
         print('바이트 초과로 보류 %d건 (요약):' % len(over))
-        for o in over[:10]:
+        for o in over[:8]:
             print('   %s  %d>%d  %s' % o)
+    print('상세 내역: %s' % rep)
     print('출력: %s' % out_dir)
 
 if __name__ == '__main__':
